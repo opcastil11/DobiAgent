@@ -5,15 +5,67 @@ const sqlite3 = require('sqlite3').verbose();
 const { ethers } = require("ethers");
 const fs = require('fs');
 const path = require('path');
-const app = express();
 const cors = require('cors');
+const app = express();
 
 const port = process.env.PORT;
 
-app.use(cors());
+// =================== ENHANCED LOGGING ===================
+const LOG_COLORS = {
+  reset: '\x1b[0m',
+  bright: '\x1b[1m',
+  red: '\x1b[31m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  magenta: '\x1b[35m',
+  cyan: '\x1b[36m',
+  gray: '\x1b[90m'
+};
 
+function log(type, message, data = null) {
+  const timestamp = new Date().toLocaleTimeString();
+  let color = LOG_COLORS.reset;
+  let icon = '•';
+
+  switch(type) {
+    case 'success':
+      color = LOG_COLORS.green;
+      icon = '✓';
+      break;
+    case 'error':
+      color = LOG_COLORS.red;
+      icon = '✗';
+      break;
+    case 'warning':
+      color = LOG_COLORS.yellow;
+      icon = '⚠';
+      break;
+    case 'info':
+      color = LOG_COLORS.blue;
+      icon = 'ℹ';
+      break;
+    case 'transaction':
+      color = LOG_COLORS.cyan;
+      icon = '⚡';
+      break;
+    case 'action':
+      color = LOG_COLORS.magenta;
+      icon = '🔧';
+      break;
+  }
+
+  console.log(`${LOG_COLORS.gray}[${timestamp}]${LOG_COLORS.reset} ${color}${icon} ${message}${LOG_COLORS.reset}`);
+  
+  if (data) {
+    console.log(`${LOG_COLORS.gray}  └─ Data:${LOG_COLORS.reset}`, data);
+  }
+}
+
+// =================== CORS ===================
+app.use(cors());
 app.use(cors({
-  origin: ['http://localhost:8080', 'http://127.0.0.1:8080', 'file://'],
+  origin: ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:3001', 'file://'],
   credentials: true
 }));
 
@@ -34,13 +86,16 @@ const masterWallet = new ethers.Wallet(MASTER_PRIVATE_KEY, provider);
 // Simulation parameters
 const MAX_DAILY_CHARGES = 100;
 const SIMULATION_HOURS = { start: 0, end: 24 }; // local server time window
-const MIN_TX_ETH = Number(process.env.MIN_TX_ETH || '0.0001'); // min 0.001 ETH
-const MAX_TX_ETH = Number(process.env.MAX_TX_ETH || '0.0002');  // max 0.01 ETH
+const MIN_TX_ETH = Number(process.env.MIN_TX_ETH || '0.0001');
+const MAX_TX_ETH = Number(process.env.MAX_TX_ETH || '0.0002');
 
 // =================== SQLITE ===================
 const db = new sqlite3.Database('./chargers.db', (err) => {
-  if (err) console.error('Error connecting to SQLite:', err);
-  else console.log('Connected to SQLite');
+  if (err) {
+    log('error', 'Error connecting to SQLite', { error: err.message });
+  } else {
+    log('success', 'Connected to SQLite database');
+  }
 });
 
 // Create tables if not exist
@@ -61,7 +116,10 @@ db.serialize(() => {
       battery REAL,
       power REAL
     )
-  `);
+  `, (err) => {
+    if (err) log('error', 'Failed to create chargers table', { error: err.message });
+    else log('success', 'Chargers table ready');
+  });
 
   db.run(`
     CREATE TABLE IF NOT EXISTS logs (
@@ -76,7 +134,10 @@ db.serialize(() => {
       battery REAL,
       power REAL
     )
-  `);
+  `, (err) => {
+    if (err) log('error', 'Failed to create logs table', { error: err.message });
+    else log('success', 'Logs table ready');
+  });
 });
 
 // =================== INITIAL DATA LOADING ===================
@@ -85,14 +146,12 @@ async function loadInitialChargers() {
     const chargerJsonPath = path.join(__dirname, 'chargers.json');
     if (fs.existsSync(chargerJsonPath)) {
       const chargerData = JSON.parse(fs.readFileSync(chargerJsonPath, 'utf8'));
-      console.log('Loading initial chargers from charger.json...');
+      log('info', `Loading ${chargerData.length} chargers from chargers.json...`);
       
       for (const charger of chargerData) {
-        // Check if charger already exists
         await new Promise((resolve) => {
           db.get("SELECT id_charger FROM chargers WHERE id_charger = ?", [charger.id_charger], (err, row) => {
             if (!row) {
-              // Create new wallet for charger
               const newWallet = ethers.Wallet.createRandom();
               
               db.run(
@@ -117,10 +176,13 @@ async function loadInitialChargers() {
                 ],
                 function (err) {
                   if (err) {
-                    console.error(`Error creating charger ${charger.id_charger}:`, err.message);
+                    log('error', `Failed to create charger ${charger.id_charger}`, { error: err.message });
                   } else {
-                    console.log(`Charger ${charger.id_charger} loaded successfully`);
-                    // Schedule transactions for this charger if active
+                    log('success', `Loaded charger ${charger.id_charger}`, {
+                      location: charger.location,
+                      status: charger.status,
+                      wallet: newWallet.address
+                    });
                     if (charger.status === 'active') {
                       scheduleChargerTransactions(charger.id_charger);
                     }
@@ -129,27 +191,28 @@ async function loadInitialChargers() {
                 }
               );
             } else {
-              console.log(`Charger ${charger.id_charger} already exists, skipping...`);
+              log('info', `Charger ${charger.id_charger} already exists, skipping...`);
               resolve();
             }
           });
         });
       }
     } else {
-      console.log('No charger.json found, starting with empty database');
+      log('warning', 'No chargers.json found, starting with empty database');
     }
   } catch (error) {
-    console.error('Error loading initial chargers:', error.message);
+    log('error', 'Error loading initial chargers', { error: error.message });
   }
 }
 
 // =================== HELPERS ===================
-let scheduledCharges = {};        // id_charger -> charges done today
-let scheduledTimeouts = [];       // timeouts references to clear on daily reset
+let scheduledCharges = {};
+let scheduledTimeouts = [];
 
 function clearScheduledTimeouts() {
   scheduledTimeouts.forEach(clearTimeout);
   scheduledTimeouts = [];
+  log('info', 'Cleared all scheduled timeouts');
 }
 
 function randomFloat(min, max) {
@@ -166,23 +229,30 @@ function addLog({ charger_id, message, transactions, income_generated, cost_gene
      balance_total, battery, power)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [charger_id, message, nowISO(), transactions, income_generated, cost_generated, balance_total, 
-     battery, power]
+     battery, power],
+    (err) => {
+      if (err) {
+        log('error', `Failed to add log for ${charger_id}`, { error: err.message });
+      }
+    }
   );
 }
 
 function initializeScheduledCharges() {
   db.all("SELECT id_charger FROM chargers", [], (err, rows) => {
-    if (err) return console.error(err);
+    if (err) {
+      log('error', 'Failed to initialize scheduled charges', { error: err.message });
+      return;
+    }
     scheduledCharges = rows.reduce((acc, row) => {
       acc[row.id_charger] = 0;
       return acc;
     }, {});
+    log('success', `Initialized scheduled charges for ${rows.length} chargers`);
   });
 }
 
-// Alternative version with more control and randomization within the 15-minute window
 function scheduleChargerTransactions(chargerId) {
-  // Schedule transactions approximately every 15 minutes with some randomization
   db.get("SELECT * FROM chargers WHERE id_charger = ? AND status = 'active'", [chargerId], (err, charger) => {
     if (err || !charger) return;
 
@@ -191,32 +261,25 @@ function scheduleChargerTransactions(chargerId) {
     const currentMinute = now.getMinutes();
     
     let scheduledTimes = [];
-    
-    // Calculate next 15-minute window
     let nextWindow = Math.ceil((currentHour * 60 + currentMinute) / 15) * 15;
     
-    // Schedule transactions every 15 minutes within simulation hours
     while (nextWindow < SIMULATION_HOURS.end * 60) {
       const hour = Math.floor(nextWindow / 60);
       const baseMinute = nextWindow % 60;
       
-      // Only schedule if we're within simulation hours
       if (hour >= SIMULATION_HOURS.start && hour < SIMULATION_HOURS.end) {
-        // Add some randomization within the 15-minute window (±5 minutes)
-        const randomOffset = Math.floor(Math.random() * 11) - 5; // -5 to +5
+        const randomOffset = Math.floor(Math.random() * 11) - 5;
         let minute = baseMinute + randomOffset;
         
-        // Ensure minute is valid (0-59)
         if (minute < 0) minute = 0;
         if (minute > 59) minute = 59;
         
         scheduledTimes.push({ hour, minute });
       }
       
-      nextWindow += 15; // Move to next 15-minute window
+      nextWindow += 15;
     }
     
-    // Schedule each transaction
     let scheduledCount = 0;
     scheduledTimes.forEach(time => {
       const scheduledTime = new Date(
@@ -225,7 +288,7 @@ function scheduleChargerTransactions(chargerId) {
         now.getDate(),
         time.hour,
         time.minute,
-        Math.floor(Math.random() * 60), // Random seconds for more natural distribution
+        Math.floor(Math.random() * 60),
         0
       );
       
@@ -236,15 +299,17 @@ function scheduleChargerTransactions(chargerId) {
           db.get("SELECT * FROM chargers WHERE id_charger = ?", [chargerId], async (e, fresh) => {
             if (e || !fresh) return;
             if (fresh.status === 'active') {
-              // Probability check - 90% chance of executing (adds some realistic variability)
               if (Math.random() < 0.9) {
-                // Check battery level
-                if ((fresh.battery || fresh.estado_bateria || 100) >= 10) {
+                if ((fresh.battery || 100) >= 10) {
                   await performSimulatedTransaction(fresh);
                   scheduledCharges[chargerId] = (scheduledCharges[chargerId] || 0) + 1;
+                } else {
+                  log('warning', `Skipped transaction for ${chargerId} - battery too low`, {
+                    battery: fresh.battery?.toFixed(1) + '%'
+                  });
                 }
               } else {
-                console.log(`Skipped transaction for ${chargerId} (random skip for realism)`);
+                log('info', `Skipped transaction for ${chargerId} (random skip for realism)`);
               }
             }
           });
@@ -255,14 +320,17 @@ function scheduleChargerTransactions(chargerId) {
       }
     });
 
-    console.log(`Scheduled ${scheduledCount} transactions for charger ${chargerId} (every ~15 minutes with randomization)`);
+    log('success', `Scheduled ${scheduledCount} transactions for ${chargerId}`);
   });
 }
 
 function scheduleDailyTransactions() {
-  // Schedule transactions for all active chargers
   db.all("SELECT id_charger FROM chargers WHERE status = 'active'", [], (err, rows) => {
-    if (err) return console.error(err);
+    if (err) {
+      log('error', 'Failed to schedule daily transactions', { error: err.message });
+      return;
+    }
+    log('info', `Scheduling transactions for ${rows.length} active chargers`);
     rows.forEach(row => {
       scheduleChargerTransactions(row.id_charger);
     });
@@ -270,7 +338,7 @@ function scheduleDailyTransactions() {
 }
 
 function resetDailySchedule() {
-  console.log("[Scheduler] Daily reset: clearing timeouts, zeroing counters, and rescheduling.");
+  log('info', 'Daily reset: clearing timeouts, zeroing counters, and rescheduling');
   clearScheduledTimeouts();
   initializeScheduledCharges();
   scheduleDailyTransactions();
@@ -278,55 +346,107 @@ function resetDailySchedule() {
 
 // =================== CORE: Simulate a transaction ===================
 async function performSimulatedTransaction(charger) {
+  const startTime = Date.now();
+  log('transaction', `Starting transaction for ${charger.id_charger}`, {
+    location: charger.location,
+    current_battery: charger.battery?.toFixed(1) + '%',
+    current_balance: charger.balance_total?.toFixed(6) + ' ETH'
+  });
+
   try {
     const id = charger.id_charger;
 
-    // Rate limit per day
     if ((scheduledCharges[id] || 0) >= MAX_DAILY_CHARGES) {
-      return; // silently skip
+      log('warning', `Rate limit reached for ${id}`, {
+        charges_today: scheduledCharges[id],
+        max_allowed: MAX_DAILY_CHARGES
+      });
+      return;
     }
 
-    // Simulate battery consumption based on power (power)
-    const batteryConsumption = (charger.power || 7.4) * 0.5; // Consumption rate based on power
+    const batteryConsumption = (charger.power || 7.4) * 0.5;
     const newBatteryLevel = Math.max(0, (charger.battery || 100) - batteryConsumption);
+    
+    log('info', `Battery consumption calculated for ${id}`, {
+      power: charger.power + ' kW',
+      consumption: batteryConsumption.toFixed(2) + '%',
+      new_level: newBatteryLevel.toFixed(1) + '%'
+    });
 
-    // Random deposit between MIN_TX_ETH and MAX_TX_ETH
     const amountEth = randomFloat(MIN_TX_ETH, MAX_TX_ETH);
-    const amountWei = ethers.parseEther(amountEth.toFixed(6)); // 6 decimals precision
+    const amountWei = ethers.parseEther(amountEth.toFixed(6));
+
+    log('transaction', `Generating transaction amount for ${id}`, {
+      amount: amountEth.toFixed(6) + ' ETH',
+      range: `${MIN_TX_ETH} - ${MAX_TX_ETH} ETH`
+    });
 
     let txHash = "simulated";
     if (SEND_ONCHAIN) {
-      // Send real tx from master wallet to charger wallet
-      const tx = await masterWallet.sendTransaction({
-        to: charger.wallet_address,
-        value: amountWei
-      });
-      const receipt = await tx.wait();
-      txHash = receipt?.hash || tx.hash;
+      log('info', `Sending REAL on-chain transaction for ${id}...`);
+      try {
+        const tx = await masterWallet.sendTransaction({
+          to: charger.wallet_address,
+          value: amountWei
+        });
+        log('transaction', `Transaction sent, waiting for confirmation...`, {
+          tx_hash: tx.hash,
+          to: charger.wallet_address
+        });
+        
+        const receipt = await tx.wait();
+        txHash = receipt?.hash || tx.hash;
+        
+        log('success', `On-chain transaction confirmed for ${id}`, {
+          tx_hash: txHash,
+          block: receipt.blockNumber,
+          gas_used: receipt.gasUsed.toString()
+        });
+      } catch (txError) {
+        log('error', `Failed to send on-chain transaction for ${id}`, {
+          error: txError.message
+        });
+        throw txError;
+      }
+    } else {
+      log('info', `Simulated transaction (no on-chain) for ${id}`);
     }
 
-    // Economics (same logic as your original code: cost = 40% of income)
-    const income = Number(ethers.formatEther(amountWei)); // ETH
+    const income = Number(ethers.formatEther(amountWei));
     const cost = income * 0.4;
     const delta = income - cost;
 
-    // Update charger aggregates
+    log('info', `Calculating economics for ${id}`, {
+      income: income.toFixed(6) + ' ETH',
+      cost: cost.toFixed(6) + ' ETH (40%)',
+      profit: delta.toFixed(6) + ' ETH'
+    });
+
     const newTransactions = (charger.transactions || 0) + 1;
     const newIncome = Number(charger.income_generated || 0) + income;
     const newCost = Number(charger.cost_generated || 0) + cost;
     const newBalance = Number(charger.balance_total || 0) + delta;
 
+    log('info', `Updating database for ${id}...`);
+    
     await new Promise((resolve, reject) => {
       db.run(
         `UPDATE chargers 
          SET transactions = ?, income_generated = ?, cost_generated = ?, balance_total = ?, battery = ?
          WHERE id_charger = ?`,
         [newTransactions, newIncome, newCost, newBalance, newBatteryLevel, id],
-        (err) => err ? reject(err) : resolve()
+        (err) => {
+          if (err) {
+            log('error', `Database update failed for ${id}`, { error: err.message });
+            reject(err);
+          } else {
+            log('success', `Database updated for ${id}`);
+            resolve();
+          }
+        }
       );
     });
 
-    // Log entry (store txHash in message)
     addLog({
       charger_id: id,
       message: `completed deposit (${txHash}) - Battery: ${newBatteryLevel.toFixed(1)}%`,
@@ -339,32 +459,36 @@ async function performSimulatedTransaction(charger) {
     });
 
     scheduledCharges[id] = (scheduledCharges[id] || 0) + 1;
-    console.log(`Simulated charge for ${id} -> +${amountEth.toFixed(6)} ETH | Battery: ${newBatteryLevel.toFixed(1)}% | tx: ${txHash}`);
+    
+    const duration = Date.now() - startTime;
+    log('success', `Transaction completed for ${id}`, {
+      duration: duration + 'ms',
+      new_balance: newBalance.toFixed(6) + ' ETH',
+      total_transactions: newTransactions,
+      charges_today: scheduledCharges[id]
+    });
+
   } catch (error) {
-    console.error(`[performSimulatedTransaction] ${charger.id_charger} error:`, error.message);
+    log('error', `Transaction failed for ${charger.id_charger}`, {
+      error: error.message,
+      stack: error.stack
+    });
   }
 }
 
 // =================== ENDPOINTS ===================
 
-// Create charger
 app.post('/api/chargers', async (req, res) => {
-  const { 
-    id_charger, 
-    owner_address, 
-    status,
-    location,
-    description,
-    battery,
-    power
-  } = req.body;
+  const { id_charger, owner_address, status, location, description, battery, power } = req.body;
+  
+  log('info', `Request to create charger: ${id_charger}`);
   
   if (!id_charger || !owner_address) {
+    log('error', 'Missing required fields', { id_charger, owner_address });
     return res.status(400).json({ error: "id_charger and owner_address are required" });
   }
 
   try {
-    // Create new wallet for charger
     const newWallet = ethers.Wallet.createRandom();
     const chargerStatus = status || "inactive";
 
@@ -374,30 +498,23 @@ app.post('/api/chargers', async (req, res) => {
        battery, power)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        id_charger,
-        owner_address,
-        newWallet.address,
-        newWallet.privateKey,
-        chargerStatus,
-        0,
-        0,
-        0,
-        0,
-        location || "No especificada",
-        description || "Cargador estándar",
-        battery || 100.0,
-        power || 7.4
+        id_charger, owner_address, newWallet.address, newWallet.privateKey, chargerStatus,
+        0, 0, 0, 0, location || "No especificada", description || "Cargador estándar",
+        battery || 100.0, power || 7.4
       ],
       function (err) {
-        if (err) return res.status(500).json({ error: err.message });
+        if (err) {
+          log('error', `Failed to create charger ${id_charger}`, { error: err.message });
+          return res.status(500).json({ error: err.message });
+        }
         
-        // Initialize in scheduledCharges
         scheduledCharges[id_charger] = 0;
         
-        // Schedule transactions if charger is created as active
         if (chargerStatus === 'active') {
           scheduleChargerTransactions(id_charger);
-          console.log(`Transaction schedule created for new active charger: ${id_charger}`);
+          log('success', `Charger ${id_charger} created and scheduled`, { status: chargerStatus });
+        } else {
+          log('success', `Charger ${id_charger} created`, { status: chargerStatus });
         }
         
         res.status(201).json({
@@ -413,17 +530,22 @@ app.post('/api/chargers', async (req, res) => {
       }
     );
   } catch (error) {
+    log('error', `Error creating charger ${id_charger}`, { error: error.message });
     res.status(500).json({ error: "Error creating charger", details: error.message });
   }
 });
 
-// Update charger details
 app.put('/api/chargers/:id', async (req, res) => {
   const { id } = req.params;
   const { location, description, battery, power } = req.body;
   
+  log('info', `Request to update charger: ${id}`, { location, description, battery, power });
+  
   db.get("SELECT * FROM chargers WHERE id_charger = ?", [id], (err, charger) => {
-    if (err || !charger) return res.status(404).json({ error: "Charger not found" });
+    if (err || !charger) {
+      log('error', `Charger not found: ${id}`);
+      return res.status(404).json({ error: "Charger not found" });
+    }
     
     const updates = [];
     const values = [];
@@ -446,6 +568,7 @@ app.put('/api/chargers/:id', async (req, res) => {
     }
     
     if (updates.length === 0) {
+      log('warning', `No fields to update for ${id}`);
       return res.status(400).json({ error: "No fields to update" });
     }
     
@@ -453,9 +576,11 @@ app.put('/api/chargers/:id', async (req, res) => {
     const query = `UPDATE chargers SET ${updates.join(", ")} WHERE id_charger = ?`;
     
     db.run(query, values, function(err) {
-      if (err) return res.status(500).json({ error: err.message });
+      if (err) {
+        log('error', `Failed to update ${id}`, { error: err.message });
+        return res.status(500).json({ error: err.message });
+      }
       
-      // Log the update
       addLog({
         charger_id: id,
         message: "Charger details updated",
@@ -467,18 +592,28 @@ app.put('/api/chargers/:id', async (req, res) => {
         power: power || charger.power
       });
       
+      log('success', `Updated charger ${id}`, { updated_fields: updates.length });
       res.json({ message: "Charger updated successfully", updated_fields: updates.length });
     });
   });
 });
 
-// Execute action on a charger
 app.post('/api/chargers/:id/action', async (req, res) => {
   const { id } = req.params;
   const { action } = req.body;
 
+  log('action', `Action requested: ${action} for ${id}`);
+
   db.get("SELECT * FROM chargers WHERE id_charger = ?", [id], async (err, charger) => {
-    if (err || !charger) return res.status(404).json({ error: "Charger not found" });
+    if (err || !charger) {
+      log('error', `Charger not found: ${id}`);
+      return res.status(404).json({ error: "Charger not found" });
+    }
+
+    log('info', `Charger found, current status: ${charger.status}`, {
+      location: charger.location,
+      battery: charger.battery?.toFixed(1) + '%'
+    });
 
     try {
       let message = "";
@@ -486,102 +621,177 @@ app.post('/api/chargers/:id/action', async (req, res) => {
 
       switch (action) {
         case "turn_off":
-          db.run("UPDATE chargers SET status = ? WHERE id_charger = ?", ["inactive", id]);
+          log('action', `Turning OFF charger ${id}`);
+          db.run("UPDATE chargers SET status = ? WHERE id_charger = ?", ["inactive", id], (err) => {
+            if (err) {
+              log('error', `Failed to turn off ${id}`, { error: err.message });
+            } else {
+              log('success', `Charger ${id} turned OFF`);
+            }
+          });
           message = "Charger turned off";
           break;
 
         case "turn_on":
+          log('action', `Turning ON charger ${id}`);
           db.run("UPDATE chargers SET status = ? WHERE id_charger = ?", ["active", id], (err) => {
             if (!err) {
-              // Schedule transactions for newly activated charger
+              log('success', `Charger ${id} turned ON, scheduling transactions...`);
               scheduleChargerTransactions(id);
-              console.log(`Charger ${id} activated and transactions scheduled`);
+              log('info', `Transactions scheduled for ${id}`);
+            } else {
+              log('error', `Failed to turn on ${id}`, { error: err.message });
             }
           });
           message = "Charger turned on";
           break;
 
         case "restart":
+          log('action', `RESTARTING charger ${id}`);
           db.run("UPDATE chargers SET status = ? WHERE id_charger = ?", ["inactive", id], (e) => {
             if (!e) {
+              log('info', `Charger ${id} set to inactive, waiting 3 seconds...`);
               setTimeout(() => {
                 db.run("UPDATE chargers SET status = ? WHERE id_charger = ?", ["active", id], (err) => {
                   if (!err) {
-                    // Schedule transactions for restarted charger
+                    log('success', `Charger ${id} reactivated, scheduling transactions...`);
                     scheduleChargerTransactions(id);
-                    console.log(`Charger ${id} restarted and transactions scheduled`);
+                    log('info', `Transactions rescheduled for ${id}`);
+                  } else {
+                    log('error', `Failed to reactivate ${id}`, { error: err.message });
                   }
                 });
               }, 3000);
+            } else {
+              log('error', `Failed to restart ${id}`, { error: e.message });
             }
           });
           message = "Charger restarted";
           break;
 
         case "recharge_battery":
-          // Recharge battery to 100%
+          log('action', `RECHARGING battery for ${id}`, {
+            current: charger.battery?.toFixed(1) + '%',
+            target: '100%'
+          });
           batteryUpdate = 100.0;
-          db.run("UPDATE chargers SET battery = ? WHERE id_charger = ?", [batteryUpdate, id]);
+          db.run("UPDATE chargers SET battery = ? WHERE id_charger = ?", [batteryUpdate, id], (err) => {
+            if (err) {
+              log('error', `Failed to recharge battery for ${id}`, { error: err.message });
+            } else {
+              log('success', `Battery recharged to 100% for ${id}`);
+            }
+          });
           message = "Battery recharged to 100%";
           break;
 
         case "create_ticket":
-          // Simulated POST to external support service
+          log('action', `Creating SUPPORT TICKET for ${id}`, {
+            location: charger.location,
+            status: charger.status,
+            battery: charger.battery?.toFixed(1) + '%'
+          });
           message = `Support ticket created for charger at ${charger.location} (simulated)`;
+          log('success', `Support ticket created for ${id}`);
           break;
 
         case "pay_costs": {
+          log('action', `Processing COST PAYMENT for ${id}`);
           const chargerWallet = new ethers.Wallet(charger.wallet_privateKey, provider);
+          
+          log('info', `Fetching wallet balance for ${id}...`);
           const balance = await provider.getBalance(chargerWallet.address);
-          const toPay = (balance * 40n) / 100n; // 40%
+          const toPay = (balance * 40n) / 100n;
+
+          log('info', `Balance calculation for ${id}`, {
+            total_balance: ethers.formatEther(balance) + ' ETH',
+            to_pay: ethers.formatEther(toPay) + ' ETH (40%)'
+          });
 
           if (!SEND_ONCHAIN) {
             message = `Simulated costs payment: ${ethers.formatEther(toPay)} ETH`;
+            log('info', `Simulated cost payment for ${id} (no on-chain)`);
             break;
           }
 
           if (toPay > 0n) {
+            log('transaction', `Sending cost payment transaction for ${id}...`);
             const tx = await chargerWallet.sendTransaction({
               to: "0x57e56B49dcF7540a991ac6B4C9597eBa892A7168",
               value: toPay
             });
-            await tx.wait();
+            log('info', `Transaction sent, waiting for confirmation...`, { tx_hash: tx.hash });
+            
+            const receipt = await tx.wait();
             message = `Paid costs: ${ethers.formatEther(toPay)} ETH`;
+            
+            log('success', `Cost payment confirmed for ${id}`, {
+              tx_hash: receipt.hash,
+              block: receipt.blockNumber,
+              amount: ethers.formatEther(toPay) + ' ETH'
+            });
           } else {
             message = "Not enough balance to pay costs";
+            log('warning', `Insufficient balance for cost payment ${id}`);
           }
           break;
         }
 
         case "send_to_owner": {
+          log('action', `Processing TRANSFER TO OWNER for ${id}`);
           const chargerWallet = new ethers.Wallet(charger.wallet_privateKey, provider);
+          
+          log('info', `Fetching wallet balance for ${id}...`);
           const balance = await provider.getBalance(chargerWallet.address);
-          const gasBuffer = ethers.parseEther("0.001"); // keep a small buffer
+          const gasBuffer = ethers.parseEther("0.001");
+
+          log('info', `Balance calculation for ${id}`, {
+            total_balance: ethers.formatEther(balance) + ' ETH',
+            gas_buffer: ethers.formatEther(gasBuffer) + ' ETH',
+            available: ethers.formatEther(balance - gasBuffer) + ' ETH'
+          });
 
           if (!SEND_ONCHAIN) {
             message = `Simulated transfer to owner: ${ethers.formatEther(balance)} ETH`;
+            log('info', `Simulated owner transfer for ${id} (no on-chain)`);
             break;
           }
 
           if (balance > gasBuffer) {
             const value = balance - gasBuffer;
+            log('transaction', `Sending transfer to owner for ${id}...`, {
+              to: charger.owner_address,
+              amount: ethers.formatEther(value) + ' ETH'
+            });
+            
             const tx = await chargerWallet.sendTransaction({
               to: charger.owner_address,
               value
             });
-            await tx.wait();
+            
+            log('info', `Transaction sent, waiting for confirmation...`, { tx_hash: tx.hash });
+            
+            const receipt = await tx.wait();
             message = `Sent ${ethers.formatEther(value)} ETH to owner`;
+            
+            log('success', `Transfer to owner confirmed for ${id}`, {
+              tx_hash: receipt.hash,
+              block: receipt.blockNumber,
+              amount: ethers.formatEther(value) + ' ETH',
+              to: charger.owner_address
+            });
           } else {
             message = "Not enough balance";
+            log('warning', `Insufficient balance for owner transfer ${id}`);
           }
           break;
         }
 
         default:
+          log('error', `Invalid action requested: ${action} for ${id}`);
           return res.status(400).json({ error: "Invalid action" });
       }
 
-      // Log the action
       addLog({
         charger_id: id,
         message,
@@ -593,6 +803,8 @@ app.post('/api/chargers/:id/action', async (req, res) => {
         power: charger.power
       });
 
+      log('success', `Action completed successfully: ${action} for ${id}`);
+
       return res.json({ 
         message,
         charger_info: {
@@ -602,16 +814,19 @@ app.post('/api/chargers/:id/action', async (req, res) => {
         }
       });
     } catch (error) {
+      log('error', `Action failed: ${action} for ${id}`, {
+        error: error.message,
+        stack: error.stack
+      });
       return res.status(500).json({ error: error.message });
     }
   });
 });
-// Get available actions for a charger
+
 app.get('/api/chargers/:id/action', async (req, res) => {
   const { id } = req.params;
   
   try {
-    // Get charger from database
     const charger = await new Promise((resolve, reject) => {
       db.get("SELECT * FROM chargers WHERE id_charger = ?", [id], (err, row) => {
         if (err) reject(err);
@@ -623,7 +838,6 @@ app.get('/api/chargers/:id/action', async (req, res) => {
       return res.status(404).json({ error: "Charger not found" });
     }
 
-    // Get blockchain balance for financial actions
     let blockchainBalance = "0";
     let blockchainBalanceWei = 0n;
     try {
@@ -633,10 +847,9 @@ app.get('/api/chargers/:id/action', async (req, res) => {
         blockchainBalanceWei = balance;
       }
     } catch (error) {
-      console.warn(`Could not fetch balance for ${charger.id_charger}:`, error.message);
+      log('warning', `Could not fetch balance for ${charger.id_charger}`, { error: error.message });
     }
 
-    // Define all available actions with their conditions and descriptions
     const actions = {
       turn_off: {
         name: "Turn Off",
@@ -706,7 +919,6 @@ app.get('/api/chargers/:id/action', async (req, res) => {
       }
     };
 
-    // Filter actions by availability and add status information
     const availableActions = {};
     const unavailableActions = {};
 
@@ -721,7 +933,6 @@ app.get('/api/chargers/:id/action', async (req, res) => {
       }
     });
 
-    // Group actions by category
     const actionsByCategory = {
       power_management: {},
       maintenance: {},
@@ -733,7 +944,6 @@ app.get('/api/chargers/:id/action', async (req, res) => {
       actionsByCategory[action.category][key] = action;
     });
 
-    // Get recent action history for this charger
     const recentActions = await new Promise((resolve, reject) => {
       db.all(
         `SELECT message, timestamp FROM logs 
@@ -798,7 +1008,7 @@ app.get('/api/chargers/:id/action', async (req, res) => {
     res.json(response);
 
   } catch (error) {
-    console.error(`Error fetching actions for charger ${id}:`, error);
+    log('error', `Error fetching actions for charger ${id}`, { error: error.message });
     res.status(500).json({ 
       error: "Internal server error",
       message: error.message 
@@ -806,7 +1016,6 @@ app.get('/api/chargers/:id/action', async (req, res) => {
   }
 });
 
-// Helper function to get reason why an action is unavailable
 function getUnavailableReason(actionKey, charger, blockchainBalance) {
   switch (actionKey) {
     case 'turn_off':
@@ -825,7 +1034,6 @@ function getUnavailableReason(actionKey, charger, blockchainBalance) {
   }
 }
 
-// Helper function to calculate time ago
 function getTimeAgo(date) {
   const now = new Date();
   const diffMs = now - date;
@@ -839,17 +1047,20 @@ function getTimeAgo(date) {
   return `${diffDays} days ago`;
 }
 
-
-// Manually trigger a simulated transaction (optionally specify amount)
 app.post('/api/chargers/:id/simulate_transaction', async (req, res) => {
   const { id } = req.params;
   const { amount_eth } = req.body || {};
 
+  log('info', `Manual transaction simulation requested for ${id}`, { amount_eth });
+
   db.get("SELECT * FROM chargers WHERE id_charger = ?", [id], async (err, charger) => {
-    if (err || !charger) return res.status(404).json({ error: "Charger not found" });
+    if (err || !charger) {
+      log('error', `Charger not found: ${id}`);
+      return res.status(404).json({ error: "Charger not found" });
+    }
     
-    // Check battery level
     if ((charger.battery || 0) < 10) {
+      log('warning', `Battery too low for ${id}`, { battery: charger.battery });
       return res.status(400).json({ 
         error: "Battery too low", 
         message: "Charger needs battery recharge",
@@ -857,10 +1068,8 @@ app.post('/api/chargers/:id/simulate_transaction', async (req, res) => {
       });
     }
     
-    // If a specific amount is provided, override MIN/MAX bounds
     if (amount_eth && typeof amount_eth === 'number' && amount_eth > 0) {
       try {
-        // Simulate battery consumption
         const batteryConsumption = (charger.power || 7.4) * 0.5;
         const newBatteryLevel = Math.max(0, (charger.battery || 100) - batteryConsumption);
         
@@ -902,6 +1111,11 @@ app.post('/api/chargers/:id/simulate_transaction', async (req, res) => {
           power: charger.power
         });
 
+        log('success', `Manual transaction completed for ${id}`, {
+          amount: amount_eth + ' ETH',
+          tx_hash: txHash
+        });
+
         return res.json({ 
           message: `Simulated ${amount_eth} ETH deposit`, 
           txHash,
@@ -909,35 +1123,23 @@ app.post('/api/chargers/:id/simulate_transaction', async (req, res) => {
           location: charger.location
         });
       } catch (e) {
+        log('error', `Manual transaction failed for ${id}`, { error: e.message });
         return res.status(500).json({ error: e.message });
       }
     } else {
-      // Use the regular randomized simulator
       await performSimulatedTransaction(charger);
       return res.json({ message: "Simulated transaction executed" });
     }
   });
 });
 
-// Get detailed chargers info (without private keys) + transaction schedules
 app.get('/api/chargers/detailed', async (req, res) => {
   try {
-    // Get all chargers from database (excluding private keys)
     const chargers = await new Promise((resolve, reject) => {
       db.all(`
         SELECT 
-          id_charger, 
-          owner_address, 
-          wallet_address, 
-          status, 
-          transactions, 
-          income_generated, 
-          cost_generated, 
-          balance_total,
-          location,
-          description,
-          battery,
-          power
+          id_charger, owner_address, wallet_address, status, transactions, 
+          income_generated, cost_generated, balance_total, location, description, battery, power
         FROM chargers
       `, [], (err, rows) => {
         if (err) reject(err);
@@ -945,13 +1147,10 @@ app.get('/api/chargers/detailed', async (req, res) => {
       });
     });
 
-    // Enhance each charger with schedule information
     const detailedChargers = await Promise.all(chargers.map(async (charger) => {
-      // Get schedule info
       const scheduledToday = scheduledCharges[charger.id_charger] || 0;
       const remainingCharges = Math.max(0, MAX_DAILY_CHARGES - scheduledToday);
       
-      // Get recent logs for this charger
       const recentLogs = await new Promise((resolve, reject) => {
         db.all(
           "SELECT message, timestamp, battery FROM logs WHERE charger_id = ? ORDER BY id DESC LIMIT 5",
@@ -963,10 +1162,8 @@ app.get('/api/chargers/detailed', async (req, res) => {
         );
       });
 
-      // Get next scheduled transaction time (if any)
       const nextScheduledTime = getNextScheduledTransaction(charger.id_charger);
       
-      // Get blockchain balance (if wallet exists)
       let blockchainBalance = "0";
       try {
         if (charger.wallet_address) {
@@ -974,10 +1171,9 @@ app.get('/api/chargers/detailed', async (req, res) => {
           blockchainBalance = ethers.formatEther(balance);
         }
       } catch (error) {
-        console.warn(`Could not fetch balance for ${charger.id_charger}:`, error.message);
+        log('warning', `Could not fetch balance for ${charger.id_charger}`, { error: error.message });
       }
 
-      // Check if battery needs recharge
       const batteryAlert = (charger.battery || 100) < 20 ? "Low battery - needs recharge" : null;
 
       return {
@@ -999,7 +1195,6 @@ app.get('/api/chargers/detailed', async (req, res) => {
       };
     }));
 
-    // Summary statistics
     const summary = {
       total_chargers: detailedChargers.length,
       active_chargers: detailedChargers.filter(c => c.status === 'active').length,
@@ -1027,31 +1222,20 @@ app.get('/api/chargers/detailed', async (req, res) => {
     });
 
   } catch (error) {
+    log('error', 'Failed to get detailed chargers', { error: error.message });
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get single charger details
 app.get('/api/chargers/:id', async (req, res) => {
   const { id } = req.params;
   
   try {
-    // Get charger from database (excluding private key for security)
     const charger = await new Promise((resolve, reject) => {
       db.get(
         `SELECT 
-          id_charger,
-          owner_address,
-          wallet_address,
-          status,
-          transactions,
-          income_generated,
-          cost_generated,
-          balance_total,
-          location,
-          description,
-          battery,
-          power
+          id_charger, owner_address, wallet_address, status, transactions,
+          income_generated, cost_generated, balance_total, location, description, battery, power
         FROM chargers 
         WHERE id_charger = ?`,
         [id],
@@ -1062,30 +1246,20 @@ app.get('/api/chargers/:id', async (req, res) => {
       );
     });
 
-    // Check if charger exists
     if (!charger) {
+      log('warning', `Charger not found: ${id}`);
       return res.status(404).json({ 
         error: "Charger not found",
         charger_id: id 
       });
     }
 
-    // Get schedule info for this charger
     const scheduledToday = scheduledCharges[charger.id_charger] || 0;
     const remainingCharges = Math.max(0, MAX_DAILY_CHARGES - scheduledToday);
     
-    // Get recent logs for this charger (last 10 entries)
     const recentLogs = await new Promise((resolve, reject) => {
       db.all(
-        `SELECT 
-          message, 
-          timestamp, 
-          transactions,
-          income_generated,
-          cost_generated,
-          balance_total,
-          battery,
-          power
+        `SELECT message, timestamp, transactions, income_generated, cost_generated, balance_total, battery, power
         FROM logs 
         WHERE charger_id = ? 
         ORDER BY id DESC 
@@ -1098,7 +1272,6 @@ app.get('/api/chargers/:id', async (req, res) => {
       );
     });
 
-    // Get blockchain balance (if wallet exists)
     let blockchainBalance = "0";
     let blockchainBalanceWei = "0";
     try {
@@ -1108,15 +1281,13 @@ app.get('/api/chargers/:id', async (req, res) => {
         blockchainBalanceWei = balance.toString();
       }
     } catch (error) {
-      console.warn(`Could not fetch balance for ${charger.id_charger}:`, error.message);
+      log('warning', `Could not fetch balance for ${charger.id_charger}`, { error: error.message });
     }
 
-    // Calculate efficiency metrics
     const efficiency = charger.transactions > 0 
       ? ((charger.balance_total / charger.income_generated) * 100).toFixed(2)
       : "0.00";
 
-    // Check battery status
     const batteryStatus = {
       level: charger.battery || 0,
       status: charger.battery >= 80 ? "good" : 
@@ -1125,12 +1296,10 @@ app.get('/api/chargers/:id', async (req, res) => {
       needs_recharge: charger.battery < 20
     };
 
-    // Get next scheduled transaction time (if active)
     const nextScheduledTime = charger.status === 'active' 
       ? getNextScheduledTransaction(charger.id_charger) 
       : null;
 
-    // Prepare response
     const response = {
       charger: {
         id_charger: charger.id_charger,
@@ -1181,7 +1350,7 @@ app.get('/api/chargers/:id', async (req, res) => {
     res.json(response);
 
   } catch (error) {
-    console.error(`Error fetching charger ${id}:`, error);
+    log('error', `Error fetching charger ${id}`, { error: error.message });
     res.status(500).json({ 
       error: "Internal server error",
       message: error.message 
@@ -1189,45 +1358,31 @@ app.get('/api/chargers/:id', async (req, res) => {
   }
 });
 
-// Helper function to get next scheduled transaction time for a charger
 function getNextScheduledTransaction(chargerId) {
-  // This is a simplified version - in a more advanced implementation
-  // you'd track the actual scheduled times
-  
-  db.get("SELECT status FROM chargers WHERE id_charger = ?", [chargerId], (err, row) => {
-    if (err || !row || row.status !== 'active') return null;
-  });
-
   const now = new Date();
   const currentHour = now.getHours();
   
-  // If we're within simulation hours and charger is active
   if (currentHour >= SIMULATION_HOURS.start && currentHour < SIMULATION_HOURS.end) {
-    // Estimate next transaction (this is approximate)
     const remainingHours = SIMULATION_HOURS.end - currentHour;
     const chargesLeft = Math.max(0, MAX_DAILY_CHARGES - (scheduledCharges[chargerId] || 0));
     
     if (chargesLeft > 0 && remainingHours > 0) {
-      // Rough estimate: spread remaining charges across remaining hours
-      const avgInterval = (remainingHours * 60) / chargesLeft; // minutes
+      const avgInterval = (remainingHours * 60) / chargesLeft;
       const nextTime = new Date(now.getTime() + (avgInterval * 60 * 1000));
       return nextTime.toISOString();
     }
   }
   
-  // Next day at start of simulation window
   const tomorrow = new Date(now);
   tomorrow.setDate(tomorrow.getDate() + 1);
   tomorrow.setHours(SIMULATION_HOURS.start, 0, 0, 0);
   return tomorrow.toISOString();
 }
 
-// Get logs with blockchain transactions
 app.get('/api/logs', async (req, res) => {
   const { include_blockchain = 'false', charger_id } = req.query;
   
   try {
-    // Get logs from database
     let dbQuery = "SELECT * FROM logs";
     let queryParams = [];
     
@@ -1250,11 +1405,9 @@ app.get('/api/logs', async (req, res) => {
       blockchain_transactions: []
     };
 
-    // If blockchain data is requested
     if (include_blockchain === 'true') {
-      console.log('Fetching blockchain transactions...');
+      log('info', 'Fetching blockchain transactions...');
       
-      // Get all chargers or specific charger
       let chargersQuery = "SELECT id_charger, wallet_address, location FROM chargers";
       let chargersParams = [];
       
@@ -1270,12 +1423,10 @@ app.get('/api/logs', async (req, res) => {
         });
       });
 
-      // Fetch blockchain transactions for each charger
       const blockchainTransactions = [];
       
       for (const charger of chargers) {
         try {
-          // Get transaction history for this wallet
           const history = await getWalletTransactionHistory(charger.wallet_address);
           
           history.forEach(tx => {
@@ -1295,11 +1446,10 @@ app.get('/api/logs', async (req, res) => {
             });
           });
         } catch (error) {
-          console.error(`Error fetching transactions for ${charger.id_charger}:`, error.message);
+          log('error', `Error fetching transactions for ${charger.id_charger}`, { error: error.message });
         }
       }
 
-      // Sort blockchain transactions by timestamp (newest first)
       blockchainTransactions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       
       response.blockchain_transactions = blockchainTransactions;
@@ -1307,32 +1457,20 @@ app.get('/api/logs', async (req, res) => {
 
     res.json(response);
   } catch (error) {
+    log('error', 'Failed to get logs', { error: error.message });
     res.status(500).json({ error: error.message });
   }
 });
 
-// Helper function to get transaction history for a wallet
 async function getWalletTransactionHistory(walletAddress, limit = 100) {
   try {
-    // Get latest block number
     const latestBlock = await provider.getBlockNumber();
-    const fromBlock = Math.max(0, latestBlock - 10000); // Last ~10k blocks (adjust as needed)
+    const fromBlock = Math.max(0, latestBlock - 10000);
     
     const transactions = [];
     
-    // Get incoming transactions
-    const incomingFilter = {
-      address: null,
-      topics: null,
-      fromBlock: fromBlock,
-      toBlock: 'latest'
-    };
-    
-    // For Base/Ethereum, we need to scan blocks or use external APIs
-    // This is a simplified version - in production you'd use APIs like Alchemy/Infura
     try {
-      // Get recent blocks and scan for transactions
-      const recentBlocks = 50; // Scan last 50 blocks for demo
+      const recentBlocks = 50;
       const startBlock = Math.max(0, latestBlock - recentBlocks);
       
       for (let blockNum = startBlock; blockNum <= latestBlock; blockNum++) {
@@ -1340,11 +1478,9 @@ async function getWalletTransactionHistory(walletAddress, limit = 100) {
           const block = await provider.getBlock(blockNum, true);
           if (block && block.transactions) {
             for (const tx of block.transactions) {
-              // Check if transaction involves our wallet
               if (tx.to && tx.to.toLowerCase() === walletAddress.toLowerCase() || 
                   tx.from && tx.from.toLowerCase() === walletAddress.toLowerCase()) {
                 
-                // Get transaction receipt for status and gas info
                 const receipt = await provider.getTransactionReceipt(tx.hash);
                 
                 transactions.push({
@@ -1361,32 +1497,30 @@ async function getWalletTransactionHistory(walletAddress, limit = 100) {
             }
           }
         } catch (blockError) {
-          // Skip blocks that might not exist or have issues
           continue;
         }
       }
     } catch (scanError) {
-      console.warn('Block scanning failed, using alternative method:', scanError.message);
+      log('warning', 'Block scanning failed', { error: scanError.message });
     }
     
-    // Limit results
     return transactions.slice(0, limit);
   } catch (error) {
-    console.error('Error fetching wallet history:', error.message);
+    log('error', 'Error fetching wallet history', { error: error.message });
     return [];
   }
 }
 
 // =================== AUTOMATED TASKS ===================
-// Every 1 hour: randomly toggle status and simulate battery recharge for low battery chargers
 setInterval(() => {
+  log('info', 'Running hourly automated tasks...');
   db.all("SELECT * FROM chargers", [], (err, rows) => {
-    if (err) return console.error(err);
+    if (err) return log('error', 'Failed to get chargers for automated tasks', { error: err.message });
+    
     rows.forEach(row => {
-      // Recharge battery if it's below 20%
       if ((row.battery || 100) < 20) {
         db.run("UPDATE chargers SET battery = ? WHERE id_charger = ?", [100, row.id_charger]);
-        console.log(`Charger ${row.id_charger} battery recharged to 100%`);
+        log('success', `Auto-recharged battery for ${row.id_charger}`);
         
         addLog({
           charger_id: row.id_charger,
@@ -1400,12 +1534,10 @@ setInterval(() => {
         });
       }
       
-      // Random status toggle
       const newStatus = Math.random() > 0.5 ? "active" : "inactive";
       db.run("UPDATE chargers SET status = ? WHERE id_charger = ?", [newStatus, row.id_charger], (err) => {
         if (!err) {
-          console.log(`Charger ${row.id_charger} status changed to ${newStatus}`);
-          // If charger becomes active, schedule new transactions
+          log('info', `Auto status change: ${row.id_charger} -> ${newStatus}`);
           if (newStatus === 'active') {
             scheduleChargerTransactions(row.id_charger);
           }
@@ -1415,7 +1547,6 @@ setInterval(() => {
   });
 }, 60 * 60 * 1000);
 
-// Daily: reset counters and re-schedule transactions
 setInterval(resetDailySchedule, 24 * 60 * 60 * 1000);
 
 app.get('/', (req, res) => {
@@ -1424,10 +1555,13 @@ app.get('/', (req, res) => {
 
 // =================== RUN ===================
 app.listen(port, "0.0.0.0", async () => {
-  console.log(`Server running on port ${port}`);
-  console.log(`Blockchain mode: ${SEND_ONCHAIN ? 'REAL TRANSACTIONS' : 'SIMULATION ONLY'}`);
-  
-  initializeScheduledCharges();
-  await loadInitialChargers();
-  scheduleDailyTransactions();
+  console.log('\n');
+  console.log('╔════════════════════════════════════════════════════════╗');
+  console.log('║            🚀 Aleph Dobi Server Started               ║');
+  console.log('╚════════════════════════════════════════════════════════╝');
+  log('success', `Server running on port ${port}`);
+  log('info', `Blockchain mode: ${SEND_ONCHAIN ? 'REAL TRANSACTIONS' : 'SIMULATION ONLY'}`);
+  log('info', `Transaction range: ${MIN_TX_ETH} - ${MAX_TX_ETH} ETH`);
+  log('info', `Max daily charges per charger: ${MAX_DAILY_CHARGES}`);
+  log('info', `Simulation hours: ${SIMULATION_HOURS.start}:00 - ${SIMULATION_HOURS.end}:00`);
 });
