@@ -16,7 +16,7 @@ app.use(express.json());
 const AGENT_PORT = process.env.AGENT_PORT || 3001;
 const BACKEND_API = process.env.BACKEND_API || 'http://localhost:6140/api';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const MONITORING_INTERVAL = 15000; // 15 seconds
+const MONITORING_INTERVAL = 60000; // 60 seconds
 
 // Fix for Node.js < 18: Add fetch polyfill
 if (!globalThis.fetch) {
