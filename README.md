@@ -5,6 +5,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 > An intelligent, blockchain-powered platform for managing electric vehicle chargers with autonomous AI decision-making capabilities.
+> Link Demo Video: https://youtu.be/eyKiBaV9OVA
 
 ## 📋 Table of Contents
 
