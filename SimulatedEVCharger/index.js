@@ -6,7 +6,16 @@ const { ethers } = require("ethers");
 const fs = require('fs');
 const path = require('path');
 const app = express();
+const cors = require('cors');
+
 const port = process.env.PORT;
+
+app.use(cors());
+
+app.use(cors({
+  origin: ['http://localhost:8080', 'http://127.0.0.1:8080', 'file://'],
+  credentials: true
+}));
 
 app.use(express.json());
 

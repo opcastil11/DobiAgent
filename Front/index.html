@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' http://localhost:6140 http://localhost:3000 http://127.0.0.1:6140 http://localhost:* http://127.0.0.1:*; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';">
+  <title>Charger Management System</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="container header-content">
+      <div class="header-left">
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+        </svg>
+        <div>
+          <h1 class="title">Aleph Dobi</h1>
+          <p class="subtitle">Charger Management System</p>
+        </div>
+      </div>
+      <button onclick="fetchChargers()" class="btn-refresh">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="23 4 23 10 17 10"></polyline>
+          <polyline points="1 20 1 14 7 14"></polyline>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+        </svg>
+        Refresh
+      </button>
+    </div>
+  </header>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container nav-content">
+      <button onclick="switchTab('dashboard')" class="nav-btn active" id="nav-dashboard">
+        Dashboard
+      </button>
+      <button onclick="switchTab('details')" class="nav-btn" id="nav-details">
+        Charger Details
+      </button>
+    </div>
+  </nav>
+
+  <!-- Main Content -->
+  <main class="container main-content">
+    <!-- Dashboard Tab -->
+    <div id="dashboard-tab" class="tab-content active">
+      <!-- Stats Cards -->
+      <div class="stats-grid" id="stats-container">
+        <!-- Stats will be dynamically loaded -->
+      </div>
+
+      <!-- Chargers Overview -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">Chargers Overview</h2>
+          <button onclick="openCreateModal()" class="btn-primary">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            New Charger
+          </button>
+        </div>
+        <div class="chargers-grid" id="chargers-container">
+          <!-- Chargers will be dynamically loaded -->
+        </div>
+      </div>
+
+      <!-- Recent Activity -->
+      <div class="card">
+        <h2 class="card-title">Recent Activity</h2>
+        <div class="activity-list" id="activity-container">
+          <!-- Activity will be dynamically loaded -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Details Tab -->
+    <div id="details-tab" class="tab-content">
+      <div id="charger-details-container">
+        <div class="empty-state">
+          <p>Select a charger to view details</p>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Create Charger Modal -->
+  <div id="create-modal" class="modal">
+    <div class="modal-content">
+      <h2 class="modal-title">Create New Charger</h2>
+      <form id="create-charger-form" onsubmit="createCharger(event)">
+        <div class="form-group">
+          <label>Charger ID *</label>
+          <input type="text" id="input-id" placeholder="e.g., charger_001" required>
+        </div>
+        <div class="form-group">
+          <label>Owner Address *</label>
+          <input type="text" id="input-owner" placeholder="0x..." required>
+        </div>
+        <div class="form-group">
+          <label>Location</label>
+          <input type="text" id="input-location" placeholder="e.g., Downtown Station">
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <input type="text" id="input-description" placeholder="Standard charger">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Battery (%)</label>
+            <input type="number" id="input-battery" value="100" min="0" max="100">
+          </div>
+          <div class="form-group">
+            <label>Power (kW)</label>
+            <input type="number" id="input-power" value="7.4" step="0.1">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Initial Status</label>
+          <select id="input-status">
+            <option value="inactive">Inactive</option>
+            <option value="active">Active</option>
+          </select>
+        </div>
+        <div class="modal-actions">
+          <button type="button" onclick="closeCreateModal()" class="btn-secondary">
+            Cancel
+          </button>
+          <button type="submit" class="btn-primary">
+            Create
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Loading Spinner -->
+  <div id="loading" class="loading">
+    <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <polyline points="23 4 23 10 17 10"></polyline>
+      <polyline points="1 20 1 14 7 14"></polyline>
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+    </svg>
+    <p>Loading chargers...</p>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
